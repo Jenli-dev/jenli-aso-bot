@@ -2,3 +2,5 @@ aiogram==3.*
 httpx
 python-dotenv
 pydantic[email]
+fastapi
+uvicorn
