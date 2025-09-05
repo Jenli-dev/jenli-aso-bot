@@ -62,6 +62,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 OUTBOUND_WEBHOOK_URL = os.getenv("OUTBOUND_WEBHOOK_URL")
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN env is required")
@@ -134,7 +135,72 @@ COPY = {
 link_re = re.compile(r"https?://\S+", re.I)
 email_re = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 store_domains = ("apps.apple.com", "play.google.com")
+def detect_store_kind(links_text: str) -> str:
+    text = (links_text or "").lower()
+    if "apps.apple.com" in text:
+        return "App Store (iOS)"
+    if "play.google.com" in text:
+        return "Google Play (Android)"
+    return "Unknown"
 
+def guess_country_from_links(links_text: str) -> Optional[str]:
+    # App Store: https://apps.apple.com/{cc}/...
+    m = re.search(r"apps\.apple\.com/([a-z]{2})/", links_text or "", re.I)
+    if m:
+        return m.group(1).upper()
+    # Google Play: ...&gl=US
+    m = re.search(r"[?&]gl=([A-Za-z]{2})", links_text or "")
+    if m:
+        return m.group(1).upper()
+    return None
+
+async def send_slack(payload: Dict[str, Any]):
+    if not SLACK_WEBHOOK_URL:
+        return
+
+    user_disp = payload.get("name") or "user"
+    if payload.get("username"):
+        user_disp = f"<https://t.me/{payload['username']}|{user_disp}>"
+
+    service = payload.get("service", "—")
+    platform = payload.get("platform", "—")
+    links = payload.get("store_links", "—")
+    store_kind = detect_store_kind(links)
+    country = guess_country_from_links(links) or "—"
+    goal = payload.get("goal", "—")
+    budget = payload.get("budget", "—")
+    email = payload.get("email", "—")
+    notes = payload.get("notes", "—")
+    lang = payload.get("lang", "—")
+    source = payload.get("source", "—")
+
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "🆕 JenLi — новый лид"}},
+        {"type": "section",
+         "fields": [
+            {"type":"mrkdwn","text": f"*From:*\n{user_disp}"},
+            {"type":"mrkdwn","text": f"*Service:*\n{service}"},
+            {"type":"mrkdwn","text": f"*Platform:*\n{platform}"},
+            {"type":"mrkdwn","text": f"*Store:*\n{store_kind}"},
+            {"type":"mrkdwn","text": f"*Country:*\n{country}"},
+            {"type":"mrkdwn","text": f"*Goal:*\n{goal}"},
+            {"type":"mrkdwn","text": f"*Budget:*\n{budget}"},
+            {"type":"mrkdwn","text": f"*Email:*\n{email}"},
+            {"type":"mrkdwn","text": f"*Lang:*\n{lang}"},
+            {"type":"mrkdwn","text": f"*Source:*\n{source}"},
+         ]},
+        {"type": "section", "text": {"type":"mrkdwn","text": f"*Links:*\n{links}"}},
+    ]
+    if notes and notes != "—":
+        blocks.append({"type":"section","text":{"type":"mrkdwn","text": f"*Notes:*\n{notes}"}})
+
+    data = {"blocks": blocks}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(SLACK_WEBHOOK_URL, json=data)
+            print(f"[SLACK] status={resp.status_code} body={resp.text[:200]}")
+    except Exception as e:
+        print(f"[SLACK][ERROR] {e!r}")
 
 def is_store_link(text: str) -> bool:
     links = link_re.findall(text or "")
@@ -224,12 +290,13 @@ async def choose_lang(call: CallbackQuery, state: FSMContext):
 
 
 @dp.message(LeadStates.lang)
-async def lang_fallback(message: Message):
-    # If user types instead of pressing button
-    lang = message.text.strip().upper() if message.text else "EN"
+async def lang_fallback(message: Message, state: FSMContext):
+    lang = (message.text or "").strip().upper() or "EN"
     if lang not in LANGS:
         lang = "EN"
+    await state.update_data(lang=lang)
     await message.answer(COPY[lang]["greet"], reply_markup=kb(COPY[lang]["services"]))
+    await state.set_state(LeadStates.service)
 
 
 @dp.message(LeadStates.service)
@@ -323,6 +390,7 @@ async def get_notes(message: Message, state: FSMContext):
 
     # Notify admin
     await notify_admin(lead)
+    await send_slack(lead)
 
     await state.clear()
 
@@ -341,7 +409,21 @@ async def handoff_keywords(message: Message, state: FSMContext):
         "lang": data.get("lang","EN"),
         "chat_id": message.chat.id,
     })
-
+await send_slack({
+    "event": "handoff",
+    "user_id": user.id,
+    "username": user.username,
+    "name": user.full_name,
+    "service": data.get("service", "—"),
+    "platform": data.get("platform", "—"),
+    "goal": "—",
+    "budget": "—",
+    "store_links": "—",
+    "email": "—",
+    "notes": "User requested human handoff",
+    "lang": data.get("lang","EN"),
+    "source": data.get("source","—"),
+})
 
 @dp.message(Command("human"))
 async def handoff_cmd(message: Message, state: FSMContext):
