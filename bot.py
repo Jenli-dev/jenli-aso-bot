@@ -236,10 +236,17 @@ async def lang_fallback(message: Message):
 async def pick_service(message: Message, state: FSMContext):
     data = await state.get_data()
     lang = data.get("lang", "EN")
-    await state.update_data(service=message.text)
-    await message.answer(COPY[lang]["platform"], reply_markup=kb(COPY[lang]["platforms"]))
-    await state.set_state(LeadStates.platform)
+    service = message.text.strip()
+    await state.update_data(service=service)
 
+    if service.lower().startswith("apple search ads"):  # ASA
+        # если ASA → сразу спрашиваем цель
+        await message.answer(COPY[lang]["goal"], reply_markup=kb(COPY[lang]["goals"]))
+        await state.set_state(LeadStates.goal)
+    else:
+        # иначе спрашиваем платформу
+        await message.answer(COPY[lang]["platform"], reply_markup=kb(COPY[lang]["platforms"]))
+        await state.set_state(LeadStates.platform)
 
 @dp.message(LeadStates.platform)
 async def pick_platform(message: Message, state: FSMContext):
